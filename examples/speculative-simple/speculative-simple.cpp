@@ -201,7 +201,8 @@ int main(int argc, char ** argv) {
 
             // reset the draft context to the checkpoint before verification
             if (ctx_dft) {
-                if (use_ckpt_dft) {
+                // only a FULL context was checkpointed above; an RS context is handled after the draft is sized
+                if (seq_rm_dft == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
                     ckpt.load_dft(ctx_dft, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
 
