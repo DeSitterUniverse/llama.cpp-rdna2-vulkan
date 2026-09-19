@@ -133,7 +133,11 @@ increased the direct graph total from **880.185 ms** to **901.566 ms**
 wave32 geometry and address calculation are therefore retained. The next
 useful optimization work is targeted SPIR-V/address-arithmetic inspection or
 full-generation timestamp profiling, rather than adding another unmeasured
-shader branch.
+shader branch. A second low-risk experiment declared the row-index SSBO as
+unsigned to remove the shader-side cast. In a 20-step warm microprofile it
+measured **32,348.8 us** mean graph time versus **32,389.8 us** for the
+signed baseline (**-0.13%**) and was likewise reverted as indistinguishable
+from noise.
 
 ## Earlier fork-vs-official baseline
 
