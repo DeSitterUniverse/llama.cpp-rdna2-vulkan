@@ -18,16 +18,18 @@
 ## Experimental RDNA2/Vulkan PQ2 branch
 
 This branch adds an AMD RDNA2/Vulkan execution path for Prism PQ2_0 models,
-plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize.
+plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize and a
+direct recurrent-state-row path for Qwen3.5 GatedDeltaNet.
 
-| Build | Mode | Decode | Prompt | MTP acceptance | Notes |
+| Path | Mode | Decode | Prompt | Change vs legacy | Notes |
 | --- | --- | ---: | ---: | ---: | --- |
-| Official Prism | No MTP | 0.91 tok/s | 1.05 tok/s | — | Unmodified baseline |
-| This fork | No MTP | 32.57 tok/s | 60.06 tok/s | — | 35.85× baseline |
-| Official Prism | MTP, n-max 2 | — | — | — | Fails graph validation |
-| This fork | MTP, n-max 2 | 48.78 tok/s | 56.33 tok/s | 73.5% | Warm mean |
+| Legacy `GET_ROWS` | No MTP | 33.83 tok/s | 76.4 tok/s | baseline | Forced with `GGML_GDN_STATE_GATHER=1` |
+| Direct state rows | No MTP | 34.67 tok/s | 77.97 tok/s | +2.46% | Default Vulkan path |
+| Legacy `GET_ROWS` | MTP n-max 2 | 46.70 tok/s | 68.63 tok/s | baseline | Same 62.5% draft acceptance |
+| Direct state rows | MTP n-max 2 | 47.40 tok/s | 68.37 tok/s | +1.50% | Same output hash and acceptance |
 
-The full workload, allocation receipt, and caveats are in
+The matched A/B methodology, profiler receipt, allocation history, rollback
+limitation, and caveats are in
 [docs/RDNA2_VULKAN.md](docs/RDNA2_VULKAN.md).
 
 This is an experimental, hardware-specific fork. It is based on Prism commit

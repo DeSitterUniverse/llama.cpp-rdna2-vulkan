@@ -13,6 +13,9 @@ Base revision: `PrismML-Eng/llama.cpp@9a9394a895b96003ca842a6041cb28ac49a108f7`
   is not naturally safe for a packed-32 load.
 - Uses a wave32 PQ2 decode pipeline with two output rows per wave on RDNA2.
 - Uses vector Q8 activation loads in the PQ2 decode loop.
+- Adds Vulkan GatedDeltaNet rows mode. The fused Vulkan kernel reads each
+  sequence's physical recurrent-state row directly from the cache instead of
+  consuming a per-layer gathered temporary.
 - Adds the inverse Hadamard transform to the Qwen3.5 MTP embedding lookup. This
   fixes MTP initialization for Prism's latent `token_embd.weight` models;
   without it, the graph verifier correctly rejects the untransformed lookup.
@@ -21,9 +24,10 @@ The CUDA PTQ1 kernels from the related Bonsai research repositories were not
 ported: their trit unpacking, CUDA warp geometry, and `v_perm_b32`/DP4A
 assumptions do not map directly to Vulkan on RDNA2.
 
-## RX 6700 XT benchmark
+## RX 6700 XT GDN rows-mode A/B
 
-Measured on 2026-09-19 with Chrome closed:
+Measured on 2026-09-19 with Chrome closed and the working tree rebuilt after the
+rows-mode implementation:
 
 - GPU: AMD Radeon RX 6700 XT, Vulkan0, 12,272 MiB
 - Model: `Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf`
@@ -33,24 +37,103 @@ Measured on 2026-09-19 with Chrome closed:
 - Flash attention: enabled
 - CPU: 8 threads; one server slot
 - Reasoning: medium; deterministic temperature 0 benchmark request
-- Generation: 128 tokens from a 22-token prompt
+- No-MTP generation: 256 tokens from the same deterministic prompt
+- MTP generation: 128 tokens from the same deterministic prompt
 - MTP: `--spec-type draft-mtp --spec-draft-n-max 2 --spec-draft-p-min 0.0`
 - Draft K/V: F16
 
-The first generation includes startup/warm-cache effects. The table uses the
-completed matched artifacts; the official no-MTP and optimized no-MTP rows are
-single 128-token runs because the official baseline took about 140 seconds to
-decode each run.
+The CLI run is one sequence and uses the same effective concurrency as
+`--parallel 1`. Each A/B mode was run four times in a fresh process; run 1 was
+discarded and the table reports runs 2-4. Standard deviation is the sample SD
+of the displayed decode rates. The wall time is the generated-token count
+divided by the reported decode rate, so it excludes model load and is a
+reproducible generation-time estimate rather than a process wall-clock time.
+
+| Path | Mode | Runs 2-4 decode tok/s | Mean ± SD | Prompt mean | Generation time | Output hash |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| Legacy `GET_ROWS` | no MTP | 33.8, 33.9, 33.8 | 33.83 ± 0.06 | 76.4 | 7.57 s / 256 | `927933b73f80c04f` |
+| Direct state rows (default) | no MTP | 34.7, 34.7, 34.6 | 34.67 ± 0.06 | 77.97 | 7.38 s / 256 | `927933b73f80c04f` |
+| Legacy `GET_ROWS` | MTP n-max 2 | 46.7, 46.7, 46.7 | 46.70 ± 0.00 | 68.63 | 2.74 s / 128 | `d15d373c288580ba` |
+| Direct state rows (default) | MTP n-max 2 | 47.4, 47.4, 47.4 | 47.40 ± 0.00 | 68.37 | 2.70 s / 128 | `d15d373c288580ba` |
+
+Relative to the forced legacy path, direct rows improves measured decode by
+**+2.46% without MTP** and **+1.50% with MTP**. The identical deterministic
+hashes show no observed generation difference in these runs.
+
+The verbose MTP receipt on the direct path reported **70 accepted / 112
+generated draft tokens (62.5%)**, mean accepted length **2.25**, and the same
+acceptance counters as the legacy path.
+
+### Profiling receipt
+
+`GGML_VK_PERF_LOGGER=1` was used for a short post-warmup run. Times below are
+the aggregate operation times from the main timing group; they are not
+wall-clock totals for the full model load.
+
+| Mode | Path | `CPY` | `GATED_DELTA_NET` | `GET_ROWS` | `SET_ROWS` | Graph total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| no MTP | Legacy | 11.677 ms | 15.491 ms | 23.939 ms | 2.430 ms | 888.770 ms |
+| no MTP | Direct rows | 11.260 ms | 21.400 ms | 2.884 ms | 2.461 ms | 880.185 ms |
+| MTP | Legacy | 16.941 ms | 15.653 ms | 12.444 ms | 1.295 ms | 669.605 ms |
+| MTP | Direct rows | 16.180 ms | 17.377 ms | 1.614 ms | 1.378 ms | 654.538 ms |
+
+The remaining direct-path `GET_ROWS` is the extra recurrent-cache relocation
+needed to preserve read-before-write ordering during cache reorders. The main
+per-layer live-state gather is the work removed by this change. Direct state
+addressing makes the GDN shader itself slower (about +38% in the short no-MTP
+profile and +11% in the MTP profile), but the eliminated gather/cache traffic
+still produces the positive end-to-end result.
+
+### A/B switch
+
+Direct rows mode is the default for Vulkan Qwen3.5 graphs. Set the environment
+variable before starting the process to force the old implementation:
+
+```text
+GGML_GDN_STATE_GATHER=1
+```
+
+The switch is read while the graph is built, so use a new CLI/server process
+for each A/B run. The direct shader uses a separate `_rows` pipeline variant;
+the existing wave32 GDN geometry is unchanged.
+
+### Correctness and limitations
+
+- Four no-MTP runs and four MTP runs exited successfully; deterministic output
+  hashes matched within each A/B pair.
+- A Vulkan validation-layer smoke run completed with no `VUID`, validation,
+  or error messages.
+- The existing `llama-rs-rollback-multi` harness does not currently pass for
+  this model even when forced to the legacy path. With `-n 16 -S 3 -s 5 -r 2
+  -k 8`, both legacy and direct produce 4 mismatches in rolled-back sequence
+  0 (first mismatch at position 12, `ref=1204`, `rb=264`), while untouched
+  sequences 1 and 2 have zero mismatches. This is a baseline limitation of
+  the current rollback path, not a new direct-row-only mismatch; it remains a
+  follow-up before claiming full multi-sequence rollback correctness.
+- GPU clock and power telemetry was not available through the installed
+  Windows Vulkan tooling, so no power/clock conclusion is claimed.
+
+### Decision and follow-up
+
+Keep direct rows enabled by default on Vulkan. The improvement is reproducible
+above the observed run-to-run noise and the old path remains available for
+regression testing. The next targeted optimization is the direct-row GDN
+shader: load `rows[seq]` once per workgroup/subgroup and reduce address
+arithmetic without changing the existing wave32 layout. The A/B profiler
+shows that this is the remaining cost center after the gather is removed.
+
+## Earlier fork-vs-official baseline
+
+For historical context, the first branch comparison (before this GDN rows-mode
+A/B) was also measured on 2026-09-19 with Chrome closed. It is retained here
+because it documents the benefit of the earlier PQ2 Vulkan work.
 
 | Build | Mode | Decode tok/s | Prompt tok/s | Result |
 | --- | --- | ---: | ---: | --- |
-| Official Prism, unmodified | no MTP | 0.91 | 1.05 | Loads, but uses the unoptimized PQ2 Vulkan path |
-| This branch | no MTP | 32.57 | 60.06 | **35.85× official** |
-| Official Prism, unmodified | MTP n-max 2 | — | — | Fails graph validation before serving |
+| Official Prism, unmodified | no MTP | 0.91 | 1.05 | Unoptimized PQ2 Vulkan path |
+| This branch | no MTP | 32.57 | 60.06 | 35.85x official |
+| Official Prism, MTP n-max 2 | MTP | — | — | Fails graph validation before serving |
 | This branch | MTP n-max 2 | 48.67 / 48.88 warm | 56.20 / 56.47 warm | 73.5% draft acceptance |
-
-The two warm MTP runs average **48.78 tok/s**. A separate verbose single-run
-receipt measured 49.17 tok/s and confirmed the same load and placement.
 
 The official MTP failure is:
 
