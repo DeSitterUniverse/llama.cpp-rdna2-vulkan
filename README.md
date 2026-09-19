@@ -18,11 +18,17 @@
 ## Experimental RDNA2/Vulkan PQ2 branch
 
 This branch adds an AMD RDNA2/Vulkan execution path for Prism PQ2_0 models,
-plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize. On an
-RX 6700 XT, the matched no-MTP test measured 32.57 tok/s versus 0.91 tok/s on
-the unmodified Prism branch. With MTP n-max 2, the fork reached a 48.78 tok/s
-warm mean with 73.5% draft acceptance. The full workload, allocation receipt,
-and caveats are in [docs/RDNA2_VULKAN.md](docs/RDNA2_VULKAN.md).
+plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize.
+
+| Build | Mode | Decode | Prompt | MTP acceptance | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| Official Prism | No MTP | 0.91 tok/s | 1.05 tok/s | — | Unmodified baseline |
+| This fork | No MTP | 32.57 tok/s | 60.06 tok/s | — | 35.85× baseline |
+| Official Prism | MTP, n-max 2 | — | — | — | Fails graph validation |
+| This fork | MTP, n-max 2 | 48.78 tok/s | 56.33 tok/s | 73.5% | Warm mean |
+
+The full workload, allocation receipt, and caveats are in
+[docs/RDNA2_VULKAN.md](docs/RDNA2_VULKAN.md).
 
 This is an experimental, hardware-specific fork. It is based on Prism commit
 [`9a9394a`](https://github.com/PrismML-Eng/llama.cpp/commit/9a9394a895b96003ca842a6041cb28ac49a108f7),
