@@ -103,12 +103,13 @@ the existing wave32 GDN geometry is unchanged.
   hashes matched within each A/B pair.
 - A Vulkan validation-layer smoke run completed with no `VUID`, validation,
   or error messages.
-- The repository's proper recurrent-state rollback test was also run on CPU
-  with the direct rows path and with `GGML_GDN_STATE_GATHER=1`. Both modes
-  fail at the same existing dirty-context check (`position 6`, token 0:
-  `4.9774 != 4.21362`). This makes the failure a baseline rollback issue,
-  not evidence of a rows-mode-only regression. The older one-token-at-a-time
-  rollback harness fails identically in both modes as well; its snapshot
+- The repository's proper recurrent-state rollback test was run on both CPU
+  and Vulkan with the default direct path and with
+  `GGML_GDN_STATE_GATHER=1`. Both modes fail at the same existing dirty-context
+  check: CPU reports `position 6`, token 0, `4.9774 != 4.21362`; Vulkan
+  reports `4.92038 != 4.16277`. The identical Vulkan result means this is not
+  evidence of a rows-mode-only regression. The older one-token-at-a-time
+  rollback harness also fails identically in both modes; its snapshot
   semantics are not a sufficient validation of the multi-token recurrent
   graph.
 - The existing `llama-rs-rollback-multi` harness does not currently pass for
