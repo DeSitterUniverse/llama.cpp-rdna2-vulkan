@@ -1433,11 +1433,19 @@ struct llm_graph_context {
             const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
 
     // like build_rs, but WITHOUT the main per-seq state gather: performs the
-    // rs_zero clear and the extra-states relocation, then returns the 2D
-    // (state_size, n_rows) cache view. For consumers that read per-seq state
-    // rows directly via inp->s_copy_main (e.g. ggml_gated_delta_net_rows),
-    // saving a get_rows per layer per decode.
+    // rs_zero clear and returns the 2D (state_size, n_rows) cache view. The
+    // extra-state relocation is scheduled separately after the direct consumer
+    // has read its rows, preserving build_rs's read-before-write ordering when
+    // a multi-sequence cache reorder overlaps a live row.
     ggml_tensor * build_rs_cache_view(
+            llm_graph_input_rs * inp,
+            ggml_tensor * s,
+                int32_t   state_size,
+                int32_t   n_seqs) const;
+
+    // Schedule the extra recurrent-cache relocation after a rows-mode consumer
+    // has read s_copy_main, but before the snapshot scatter writes new states.
+    void build_rs_cache_relocate_extra(
             llm_graph_input_rs * inp,
             ggml_tensor * s,
                 int32_t   state_size,

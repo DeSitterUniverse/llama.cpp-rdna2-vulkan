@@ -553,9 +553,9 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
 
     const bool keep = cparams.n_rs_seq > 0;
 
-    GGML_ASSERT(state_rows == nullptr || keep); // rows mode is a ring-path optimization
-
-    if (!keep) {
+    // Rows mode also supports ordinary K=1 decode. The old early return is
+    // retained for backends that do not support direct cache-row reads.
+    if (!keep && state_rows == nullptr) {
         auto attn_out = build_delta_net(q, k, v, g, b, s, il);
         ggml_tensor * output    = attn_out.first;
         ggml_tensor * new_state = attn_out.second;
@@ -612,21 +612,52 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
     const int64_t n_written = std::min<int64_t>(n_seq_tokens, K);
 
     if (state_rows) {
-        // rows mode: scatter the compact snapshot region [D, n_written*n_seqs]
-        // (slot-major, starting right after the attention scores) into the
-        // cache rows slot*mem_size + kv_head + seq -- same destinations as the
-        // strided cpy below, but expressed as SET_ROWS so the Metal backend
-        // can fold the scatter into the fused op's epilogue.
-        ggml_tensor * snaps = ggml_view_2d(ctx0, gdn_out,
-            D, n_written * n_seqs,
-            ggml_row_size(gdn_out->type, D),
-            ggml_row_size(gdn_out->type, attn_score_elems));
+        // Materialize the GDN node in the graph before adding the relocation
+        // node below. The two operations share the cache tensor as an
+        // in-place resource, so insertion order is the dependency that keeps
+        // the direct read ahead of the extra-state write.
+        ggml_build_forward_expand(gf, gdn_out);
 
-        ggml_tensor * write_rows = build_rs_write_rows(inp, K, n_seq_tokens, n_seqs);
+        // The direct rows consumer has now read s_copy_main. Relocate the
+        // auxiliary recurrent rows only after that read, otherwise a
+        // multi-sequence cache reorder can overwrite a live source row before
+        // Vulkan GDN reaches it.
+        build_rs_cache_relocate_extra(inp, s, D, n_seqs);
 
-        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, ssm_states_all, snaps, write_rows));
+        if (!keep) {
+            // With K=1 there is no rollback snapshot ring. The slot-0 rows at
+            // [kv_head, kv_head+n_seqs) are contiguous, so use the same direct
+            // copy shape as the legacy path instead of paying for a generic
+            // SET_ROWS scatter on every recurrent layer.
+            ggml_tensor * src = ggml_view_2d(ctx0, gdn_out,
+                D, n_seqs,
+                ggml_row_size(gdn_out->type, D),
+                ggml_row_size(gdn_out->type, attn_score_elems));
 
-        return output;
+            ggml_tensor * dst = ggml_view_2d(ctx0, ssm_states_all,
+                D, n_seqs,
+                ssm_states_all->nb[1],
+                (size_t) kv_head * row_size);
+
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
+            return output;
+        }
+
+        if (gdn_rows_use_set_rows) {
+            // Rows mode: scatter the compact snapshot region [D,
+            // n_written*n_seqs] into cache rows slot*mem_size + kv_head + seq.
+            // Metal can fold this SET_ROWS into its fused epilogue.
+            ggml_tensor * snaps = ggml_view_2d(ctx0, gdn_out,
+                D, n_written * n_seqs,
+                ggml_row_size(gdn_out->type, D),
+                ggml_row_size(gdn_out->type, attn_score_elems));
+
+            ggml_tensor * write_rows = build_rs_write_rows(inp, K, n_seq_tokens, n_seqs);
+
+            ggml_build_forward_expand(gf, ggml_set_rows(ctx0, ssm_states_all, snaps, write_rows));
+
+            return output;
+        }
     }
 
     // write the produced snapshots into the recurrent cache (snapshot slot i -> rollback group i)

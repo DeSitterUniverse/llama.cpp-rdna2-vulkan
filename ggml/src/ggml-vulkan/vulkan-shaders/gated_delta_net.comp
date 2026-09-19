@@ -2,6 +2,9 @@
 
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_KHR_shader_subgroup_basic : enable
+#ifndef USE_ROWS
+#define USE_ROWS 0
+#endif
 #if USE_SUBGROUP_CLUSTERED
 #extension GL_KHR_shader_subgroup_clustered : enable
 #endif
@@ -26,6 +29,7 @@ layout(push_constant) uniform Parameters {
     uint n_tokens;
     uint n_seqs;
     uint s_off;
+    uint state_stride;
     uint sq1, sq2, sq3;
     uint sv1, sv2, sv3;
     uint sb1, sb2, sb3;
@@ -40,7 +44,12 @@ layout(binding = 2) readonly  buffer VBuf     { FLOAT_TYPE data_v[];     };
 layout(binding = 3) readonly  buffer GBuf     { FLOAT_TYPE data_g[];     };
 layout(binding = 4) readonly  buffer BetaBuf  { FLOAT_TYPE data_beta[];  };
 layout(binding = 5) readonly  buffer StateBuf { FLOAT_TYPE data_state[]; };
+#if USE_ROWS
+layout(binding = 6) readonly  buffer RowsBuf  { int data_rows[];        };
+layout(binding = 7)           buffer DstBuf   { FLOAT_TYPE data_dst[];   };
+#else
 layout(binding = 6)           buffer DstBuf   { FLOAT_TYPE data_dst[];   };
+#endif
 
 #if !USE_SUBGROUP_ADD && !USE_SUBGROUP_CLUSTERED
 shared FLOAT_TYPE temp[SUBGROUP_SIZE];
@@ -102,8 +111,17 @@ void main() {
     const uint iq3 = seq_id / rq3;
 
     const uint state_size = S_V * S_V;
-    // input state holds s0 only [S_v, S_v, H, n_seqs]: per-seq stride is H*D.
-    const uint state_in_base       = (seq_id * H + head_id) * state_size;
+#if USE_ROWS
+    // Rows mode keeps the cache in its native [state_size, n_rows] layout.  The
+    // row index is logical-sequence specific and is supplied by the recurrent
+    // memory manager, so do not assume seq_id is the physical cache row.
+    const uint state_row            = uint(data_rows[seq_id]);
+    const uint state_in_base        = state_row * state_stride + head_id * state_size;
+#else
+    // Legacy mode receives a contiguous gathered tensor with one state per
+    // logical sequence, so the per-sequence stride is H*D.
+    const uint state_in_base        = (seq_id * H + head_id) * state_size;
+#endif
     // output state layout per slot: same per-(seq,head) offset as the single-slot case.
     const uint state_out_base      = (seq_id * H + head_id) * state_size;
     const uint state_size_per_snap = state_size * H * n_seqs;

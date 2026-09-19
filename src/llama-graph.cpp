@@ -3600,39 +3600,47 @@ ggml_tensor * llm_graph_context::build_rs(
 ggml_tensor * llm_graph_context::build_rs_cache_view(
         llm_graph_input_rs * inp,
         ggml_tensor * s,
-            int32_t   state_size,
+        int32_t   state_size,
             int32_t   n_seqs) const {
     const auto * kv_state = inp->mctx;
+    GGML_UNUSED(n_seqs);
 
-    const uint32_t n_rs     = kv_state->get_n_rs();
-    const uint32_t rs_head  = kv_state->get_head();
     const  int32_t rs_zero  = kv_state->get_rs_z();
 
     ggml_tensor * states = ggml_reshape_2d(ctx0, s, state_size, s->ne[1]);
 
-    // same cache hygiene as build_rs, minus the main gather (the consumer reads
-    // per-seq rows via inp->s_copy_main directly, inside the GDN op).
-    //
-    // KNOWN LIMITATION (tracked follow-up): build_rs gathers the main rows
-    // BEFORE this extra relocation, so an overlapping main row is read before
-    // being overwritten. rows mode defers the main read into the consumer, and
-    // s_copy() maps a main row to an arbitrary cache slot (idx*size + src0),
-    // which can fall inside the extra destination [rs_head+n_seqs, rs_head+n_rs)
-    // during a cache reorder -- so this relocation could clobber a main row the
-    // consumer will later read. Not reachable on the current single-sequence
-    // decode path, but it is a real multi-sequence hazard; the correct fix is
-    // to order the relocation AFTER the GDN read (build_rs's read-before-write
-    // ordering), which is a graph-dependency refactor left as follow-up.
+    // Same cache hygiene as build_rs, minus the main gather. The extra-state
+    // relocation is deliberately scheduled by build_rs_cache_relocate_extra()
+    // after the direct consumer has read s_copy_main.
     ggml_tensor * state_zero = ggml_view_1d(ctx0, states, state_size*(rs_zero >= 0), rs_zero*states->nb[1]*(rs_zero >= 0));
     ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero, 0));
 
+    return states;
+}
+
+void llm_graph_context::build_rs_cache_relocate_extra(
+        llm_graph_input_rs * inp,
+        ggml_tensor * s,
+            int32_t   state_size,
+            int32_t   n_seqs) const {
+    const auto * kv_state = inp->mctx;
+
+    const uint32_t n_rs    = kv_state->get_n_rs();
+    const uint32_t rs_head = kv_state->get_head();
+
+    ggml_tensor * states = ggml_reshape_2d(ctx0, s, state_size, s->ne[1]);
     ggml_tensor * states_extra = ggml_get_rows(ctx0, states, inp->s_copy_extra);
+
+    // build_rs gathers the live rows before this copy. Rows mode reads them in
+    // the GDN op itself, so this node must be inserted after that op and before
+    // the snapshot scatter. This preserves the same read-before-write ordering
+    // for overlapping multi-sequence cache reorders without restoring the main
+    // GET_ROWS temporary on the normal decode path.
     ggml_build_forward_expand(gf,
         ggml_cpy(ctx0,
             states_extra,
-            ggml_view_2d(ctx0, s, state_size, (n_rs - n_seqs), s->nb[1], (rs_head + n_seqs)*s->nb[1])));
-
-    return states;
+            ggml_view_2d(ctx0, s, state_size, n_rs - n_seqs, s->nb[1],
+                (rs_head + n_seqs) * s->nb[1])));
 }
 
 ggml_tensor * llm_graph_context::build_rs_write_rows(

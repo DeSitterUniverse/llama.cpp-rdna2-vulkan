@@ -156,8 +156,12 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
         // integrated GPUs (e.g. unified-memory CUDA devices) report IGPU, not GPU
         const bool is_gpu = ggml_backend_dev_type(ldev.dev) == GGML_BACKEND_DEVICE_TYPE_GPU ||
                             ggml_backend_dev_type(ldev.dev) == GGML_BACKEND_DEVICE_TYPE_IGPU;
-        if (is_gpu && strcmp(reg_name, "MTL") != 0) {
+        if (is_gpu && strcmp(reg_name, "MTL") != 0 && strcmp(reg_name, "Vulkan") != 0) {
             gdn_state_rows_dev_ok = false;
+        }
+        if (strcmp(reg_name, "Vulkan") == 0) {
+            gdn_rows_use_set_rows  = false;
+            gdn_state_rows_k1_dev_ok = true;
         }
         if (strcmp(reg_name, "MTL") != 0 && strcmp(reg_name, "CUDA") != 0 &&
             strcmp(reg_name, "ROCm") != 0 && strcmp(reg_name, "MUSA") != 0 && strcmp(reg_name, "CPU") != 0) {
@@ -473,13 +477,16 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     // ring path: read per-seq live state directly from the cache inside the
     // fused GDN op (rows mode) instead of a gather per layer.
     // GGML_GDN_STATE_GATHER=1 restores the legacy gathered path (A/B).
-    // rows mode (the src[6] variant) is implemented on CPU and Metal only;
-    // other GPU backends reject it in supports_op, which would silently move
-    // the whole recurrent op to CPU -- keep the gathered form unless every
-    // GPU device in the model is Metal.
+    // rows mode (the src[6] variant) is implemented on CPU, Metal, and Vulkan;
+    // keep the gathered form unless every GPU device in the model supports the
+    // direct recurrent-state read.
     static const bool gdn_state_rows_env = getenv("GGML_GDN_STATE_GATHER") == nullptr;
 
-    const bool gdn_state_rows = gdn_state_rows_env && gdn_state_rows_dev_ok && cparams.n_rs_seq > 0;
+    // Direct rows mode is valid for both ordinary K=1 Vulkan decoding and the
+    // wider snapshot-ring path used by speculative rollback. Keep the previous
+    // n_rs_seq gate for other backends until they opt into the K=1 path too.
+    const bool gdn_state_rows = gdn_state_rows_env && gdn_state_rows_dev_ok &&
+        (cparams.n_rs_seq > 0 || gdn_state_rows_k1_dev_ok);
 
     ggml_tensor * state;
     if (gdn_state_rows) {

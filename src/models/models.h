@@ -79,11 +79,11 @@ struct llm_build_delta_net_base : public llm_graph_context {
     // run delta-net attention and write the new recurrent state(s) back to ssm_states_all
     // s: (head_v_dim, head_v_dim, num_v_heads, n_seqs); returns output: (head_v_dim, num_v_heads, n_seq_tokens, n_seqs)
     //
-    // state_rows (optional, ring path only): when set, `s` is instead the 2D
-    // cache view from build_rs_cache_view and the fused op reads each seq's
-    // live state directly at cache row state_rows[seq] (inp->s_copy_main) --
-    // no gathered scratch; the snapshot write becomes a SET_ROWS the Metal
-    // backend can fold into the fused op's epilogue.
+    // state_rows (optional): when set, `s` is instead the 2D cache view from
+    // build_rs_cache_view and the fused op reads each seq's live state directly
+    // at cache row state_rows[seq] (inp->s_copy_main) -- no gathered scratch.
+    // Backends may select a strided copy instead of SET_ROWS for the snapshot
+    // write when that is faster for their graph implementation.
     // set per layer before build_recurrent_attn: the fused GDN op then receives the
     // pre-activation beta / alpha and folds sigmoid / softplus into its prologue
     // (ggml_gated_delta_net_set_raw_gates); the non-fused paths keep the activated g / b
@@ -91,6 +91,11 @@ struct llm_build_delta_net_base : public llm_graph_context {
     ggml_tensor * gdn_raw_alpha   = nullptr;
     ggml_tensor * gdn_raw_dt_bias = nullptr;
     ggml_tensor * gdn_raw_a       = nullptr;
+
+    // Metal's rows-mode fused epilogue can make SET_ROWS worthwhile. Vulkan's
+    // generic SET_ROWS path is much slower than the existing strided copy, so
+    // Qwen3.5 selects the copy path for Vulkan during graph construction.
+    bool gdn_rows_use_set_rows = true;
 
     ggml_tensor * build_recurrent_attn(
             llm_graph_input_rs * inp,
@@ -2267,7 +2272,8 @@ struct llama_model_qwen35 : public llama_model_base {
         graph(const llama_model & model, const llm_graph_params & params);
 
         // device-dependent path choices, scanned once per graph build (not per layer)
-        bool gdn_state_rows_dev_ok = true; // every GPU device is Metal: fused GDN may read state rows in place
+        bool gdn_state_rows_dev_ok = true; // every GPU device supports in-place fused-GDN state-row reads
+        bool gdn_state_rows_k1_dev_ok = false; // Vulkan can use rows mode for ordinary K=1 decode
         bool gdn_raw_gates_dev_ok  = true; // every device is CPU/Metal/CUDA/ROCm/MUSA: fused GDN takes raw gates
     private:
         ggml_tensor * build_layer_attn(
