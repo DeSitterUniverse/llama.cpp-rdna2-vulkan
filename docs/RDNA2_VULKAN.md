@@ -103,6 +103,14 @@ the existing wave32 GDN geometry is unchanged.
   hashes matched within each A/B pair.
 - A Vulkan validation-layer smoke run completed with no `VUID`, validation,
   or error messages.
+- The repository's proper recurrent-state rollback test was also run on CPU
+  with the direct rows path and with `GGML_GDN_STATE_GATHER=1`. Both modes
+  fail at the same existing dirty-context check (`position 6`, token 0:
+  `4.9774 != 4.21362`). This makes the failure a baseline rollback issue,
+  not evidence of a rows-mode-only regression. The older one-token-at-a-time
+  rollback harness fails identically in both modes as well; its snapshot
+  semantics are not a sufficient validation of the multi-token recurrent
+  graph.
 - The existing `llama-rs-rollback-multi` harness does not currently pass for
   this model even when forced to the legacy path. With `-n 16 -S 3 -s 5 -r 2
   -k 8`, both legacy and direct produce 4 mismatches in rolled-back sequence
@@ -117,10 +125,14 @@ the existing wave32 GDN geometry is unchanged.
 
 Keep direct rows enabled by default on Vulkan. The improvement is reproducible
 above the observed run-to-run noise and the old path remains available for
-regression testing. The next targeted optimization is the direct-row GDN
-shader: load `rows[seq]` once per workgroup/subgroup and reduce address
-arithmetic without changing the existing wave32 layout. The A/B profiler
-shows that this is the remaining cost center after the gather is removed.
+regression testing. A subgroup-broadcast experiment for `rows[seq]` was
+implemented and measured, then reverted: in the short no-MTP profiler run it
+increased the direct graph total from **880.185 ms** to **901.566 ms**
+(**+2.43%**, slower), with no compensating end-to-end gain. The existing
+wave32 geometry and address calculation are therefore retained. The next
+useful optimization work is targeted SPIR-V/address-arithmetic inspection or
+full-generation timestamp profiling, rather than adding another unmeasured
+shader branch.
 
 ## Earlier fork-vs-official baseline
 
