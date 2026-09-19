@@ -15,6 +15,20 @@
 >
 > Do NOT build from `prism-v6` (stale mid-migration snapshot) and do NOT mix this fork's `ggml-*` libraries with a stock llama.cpp build.
 
+## Experimental RDNA2/Vulkan PQ2 branch
+
+This branch adds an AMD RDNA2/Vulkan execution path for Prism PQ2_0 models,
+plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize. On an
+RX 6700 XT, the matched no-MTP test measured 32.57 tok/s versus 0.91 tok/s on
+the unmodified Prism branch. With MTP n-max 2, the fork reached a 48.78 tok/s
+warm mean with 73.5% draft acceptance. The full workload, allocation receipt,
+and caveats are in [docs/RDNA2_VULKAN.md](docs/RDNA2_VULKAN.md).
+
+This is an experimental, hardware-specific fork. It is based on Prism commit
+[`9a9394a`](https://github.com/PrismML-Eng/llama.cpp/commit/9a9394a895b96003ca842a6041cb28ac49a108f7),
+does not modify model weights, and does not claim byte-identical output across
+the wave64 and wave32 reduction paths.
+
 ---
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)

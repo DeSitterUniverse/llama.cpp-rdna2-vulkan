@@ -634,6 +634,19 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
         tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+
+        // MTP reads the same latent embedding table as the target graph.
+        // Restore the primal basis before the MTP embedding norm when Prism's
+        // Hadamard folding metadata marks this table as lookup-side latent.
+        if (hadamard_inverses) {
+            const auto it = hadamard_inverses->find(tok_embd_w);
+            if (it != hadamard_inverses->end()) {
+                tok_embd = llama_mul_mat_hadamard(ctx0, tok_embd, it->second.rot);
+                if (it->second.signs) {
+                    tok_embd = ggml_mul(ctx0, tok_embd, it->second.signs);
+                }
+            }
+        }
     } else {
         tok_embd = inp->embd;
     }
