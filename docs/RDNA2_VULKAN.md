@@ -103,15 +103,21 @@ the existing wave32 GDN geometry is unchanged.
   hashes matched within each A/B pair.
 - A Vulkan validation-layer smoke run completed with no `VUID`, validation,
   or error messages.
-- The repository's proper recurrent-state rollback test was run on both CPU
-  and Vulkan with the default direct path and with
-  `GGML_GDN_STATE_GATHER=1`. Both modes fail at the same existing dirty-context
-  check: CPU reports `position 6`, token 0, `4.9774 != 4.21362`; Vulkan
-  reports `4.92038 != 4.16277`. The identical Vulkan result means this is not
-  evidence of a rows-mode-only regression. The older one-token-at-a-time
-  rollback harness also fails identically in both modes; its snapshot
-  semantics are not a sufficient validation of the multi-token recurrent
-  graph.
+- The recurrent-state rollback test now passes on CPU and Vulkan with both the
+  default direct path and `GGML_GDN_STATE_GATHER=1`. The checks include full,
+  partial, and dirty-context restore, multi-sequence replay across internal
+  ubatch splits, and sequence-isolation replay. The Vulkan correctness run used
+  a 4K test context with q8 KV because the harness creates five contexts; the
+  64K target-context configuration is covered separately by the throughput
+  A/B runs above. Both Vulkan modes reported `multi-seq split replay matched
+  (max diff 0)` and `seq-1-only decode independent of seq 0 (max diff 0)`.
+- The test fix also corrected its oracle: one expected-logit buffer had been
+  reused for both full and partial replay, producing a false dirty-context
+  mismatch. The multi-sequence setup now keeps the three-token rollback tail
+  in the same decode call as its prefix. This follows the recurrent cache
+  contract, which preserves the snapshot window across ubatch splits within a
+  call but does not promise a new snapshot window for a short separate tail
+  call smaller than `n_rs_seq + 1`.
 - The existing `llama-rs-rollback-multi` harness does not currently pass for
   this model even when forced to the legacy path. With `-n 16 -S 3 -s 5 -r 2
   -k 8`, both legacy and direct produce 4 mismatches in rolled-back sequence
