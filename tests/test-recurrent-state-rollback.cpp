@@ -83,22 +83,24 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
 
     bool ok = true;
 
-    // both contexts decode the identical [0, p0) prefill; only ctx_roll decodes
-    // the tail, which is then rolled back so its restore is pending at replay
+    // Keep the rollback tail in the same decode call as the prefix. The
+    // recurrent cache guarantees snapshot history across ubatch splits inside
+    // one call; a short, separate tail call is intentionally not covered by
+    // that contract because it can be smaller than n_rs_seq + 1.
     for (uint32_t s = 0; s < n_seqs && ok; ++s) {
-        llama_batch batch = llama_batch_init(n_prompt, 0, 1);
-        for (llama_pos pos = 0; pos < (llama_pos) p0; ++pos) {
-            common_batch_add(batch, tok(s, pos), pos, { (llama_seq_id) s }, false);
+        llama_batch batch_roll = llama_batch_init(n_prompt, 0, 1);
+        for (llama_pos pos = 0; pos < (llama_pos) n_prompt; ++pos) {
+            common_batch_add(batch_roll, tok(s, pos), pos, { (llama_seq_id) s }, false);
         }
-        ok = ok && llama_decode(ctx_roll, batch) == 0;
-        ok = ok && llama_decode(ctx_ref,  batch) == 0;
+        ok = ok && llama_decode(ctx_roll, batch_roll) == 0;
+        llama_batch_free(batch_roll);
 
-        common_batch_clear(batch);
-        for (llama_pos pos = p0; pos < (llama_pos) n_prompt; ++pos) {
-            common_batch_add(batch, tok(s, pos), pos, { (llama_seq_id) s }, false);
+        llama_batch batch_ref = llama_batch_init(p0, 0, 1);
+        for (llama_pos pos = 0; pos < (llama_pos) p0; ++pos) {
+            common_batch_add(batch_ref, tok(s, pos), pos, { (llama_seq_id) s }, false);
         }
-        ok = ok && llama_decode(ctx_roll, batch) == 0;
-        llama_batch_free(batch);
+        ok = ok && llama_decode(ctx_ref, batch_ref) == 0;
+        llama_batch_free(batch_ref);
 
         ok = ok && llama_memory_seq_rm(llama_get_memory(ctx_roll), (llama_seq_id) s, p0, -1);
 
@@ -292,8 +294,8 @@ int main(int argc, char ** argv) {
     ckpt.load_tgt(ctx_dst, 0, 0);
 
     constexpr float eps = 1e-5f;
-    std::vector<std::vector<float>> logits_src_replay(n_rollback);
-    const auto replay_and_compare = [&](const char * mode) {
+    std::vector<std::vector<float>> logits_src_full(n_rollback);
+    const auto replay_and_compare = [&](const char * mode, std::vector<std::vector<float>> & expected) {
         for (uint32_t i = 0; i < n_rollback; ++i) {
             const llama_pos pos = rollback_pos + i;
             if (!decode_one(ctx_src, tokens[pos], pos) ||
@@ -309,7 +311,7 @@ int main(int argc, char ** argv) {
                 return false;
             }
 
-            logits_src_replay[i].assign(logits_src, logits_src + n_vocab);
+            expected[i].assign(logits_src, logits_src + n_vocab);
             for (int token = 0; token < n_vocab; ++token) {
                 if (std::fabs(logits_src[token] - logits_dst[token]) > eps) {
                     fprintf(stderr, "%s : %s logits mismatch at position %d, token %d (%g != %g)\n",
@@ -320,7 +322,7 @@ int main(int argc, char ** argv) {
         }
         return true;
     };
-    if (!replay_and_compare("full")) {
+    if (!replay_and_compare("full", logits_src_full)) {
         return 1;
     }
 
@@ -335,7 +337,8 @@ int main(int argc, char ** argv) {
     ckpt_partial.update_tgt(ctx_src, 0, partial_flags);
     ckpt_partial.load_tgt(ctx_dst, 0, partial_flags);
 
-    if (!replay_and_compare("partial")) {
+    std::vector<std::vector<float>> logits_src_partial(n_rollback);
+    if (!replay_and_compare("partial", logits_src_partial)) {
         return 1;
     }
 
@@ -380,9 +383,9 @@ int main(int argc, char ** argv) {
         }
 
         for (int token = 0; token < n_vocab; ++token) {
-            if (std::fabs(logits_src_replay[i][token] - logits_dirty[token]) > eps) {
+            if (std::fabs(logits_src_full[i][token] - logits_dirty[token]) > eps) {
                 fprintf(stderr, "%s : dirty-ctx logits mismatch at position %d, token %d (%g != %g)\n",
-                        __func__, pos, token, (double) logits_src_replay[i][token], (double) logits_dirty[token]);
+                        __func__, pos, token, (double) logits_src_full[i][token], (double) logits_dirty[token]);
                 return 1;
             }
         }
