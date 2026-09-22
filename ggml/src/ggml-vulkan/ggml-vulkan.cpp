@@ -5336,11 +5336,16 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (device->integer_dot_product) {
                 const uint32_t subgroup_size_int = (device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size;
                 const uint32_t wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_int : (subgroup_size_int * 4);
-                const uint32_t pq2_subgroup_size_int = 32;
-                const uint32_t pq2_wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? pq2_subgroup_size_int : (pq2_subgroup_size_int * 4);
+                // The PQ2 Q8-activation shader has a fixed wave32 lane mapping.
+                const bool pq2_subgroup32_supported = device->subgroup_size == 32 ||
+                    (device->subgroup_size_control && device->subgroup_min_size <= 32 && device->subgroup_max_size >= 32);
 
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q2_0][i], "mul_mat_vec_q2_0_q8_1_f32", arr_dmmv_q2_0_q8_1_f32_len[reduc], arr_dmmv_q2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {2*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 2*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
-                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_PQ2_0][i], "mul_mat_vec_pq2_0_q8_1_f32", arr_dmmv_pq2_0_q8_1_f32_len[reduc], arr_dmmv_pq2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {2*rm_kq_int, 1, 1}, {pq2_wg_size_subgroup_int, 2*rm_kq_int, i+1}, 1, true, use_subgroups, pq2_subgroup_size_int);
+                if (pq2_subgroup32_supported) {
+                    const uint32_t pq2_subgroup_size_int = 32;
+                    const uint32_t pq2_wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? pq2_subgroup_size_int : (pq2_subgroup_size_int * 4);
+                    ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_PQ2_0][i], "mul_mat_vec_pq2_0_q8_1_f32", arr_dmmv_pq2_0_q8_1_f32_len[reduc], arr_dmmv_pq2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {2*rm_kq_int, 1, 1}, {pq2_wg_size_subgroup_int, 2*rm_kq_int, i+1}, 1, true, use_subgroups, pq2_subgroup_size_int);
+                }
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_0][i], "mul_mat_vec_q4_0_q8_1_f32", arr_dmmv_q4_0_q8_1_f32_len[reduc], arr_dmmv_q4_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_stdq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_stdq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_1][i], "mul_mat_vec_q4_1_q8_1_f32", arr_dmmv_q4_1_q8_1_f32_len[reduc], arr_dmmv_q4_1_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_stdq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_stdq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_0][i], "mul_mat_vec_q5_0_q8_1_f32", arr_dmmv_q5_0_q8_1_f32_len[reduc], arr_dmmv_q5_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_stdq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_stdq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
@@ -14847,26 +14852,39 @@ static void ggml_vk_dequantize_data(const void * from, float * to, size_t ne, gg
     dequant_fn(from, to, ne);
 }
 
-static void ggml_vk_test_dequant(ggml_backend_vk_context * ctx, size_t ne, ggml_type quant) {
-    VK_LOG_DEBUG("ggml_vk_test_dequant(" << ne << ")");
+static bool ggml_vk_test_pq2_dequant(ggml_backend_vk_context * ctx) {
+    constexpr size_t ne = 16384;
+    const size_t block_size = ggml_blck_size(GGML_TYPE_PQ2_0);
+    const size_t block_bytes = ggml_type_size(GGML_TYPE_PQ2_0);
+    const size_t nblocks = ne / block_size;
+    const size_t qx_sz = nblocks * block_bytes;
     const size_t x_sz = sizeof(float) * ne;
     const size_t x_sz_f16 = sizeof(ggml_fp16_t) * ne;
-    const size_t qx_sz = ne * ggml_type_size(quant)/ggml_blck_size(quant);
-    float * x = (float *) malloc(x_sz);
-    void * qx = malloc(qx_sz);
-    vk_buffer qx_buf = ggml_vk_create_buffer_check(ctx->device, qx_sz, {vk::MemoryPropertyFlagBits::eDeviceLocal});
-    vk_buffer x_buf = ggml_vk_create_buffer_check(ctx->device, x_sz_f16, {vk::MemoryPropertyFlagBits::eDeviceLocal});
-    float * x_ref = (float *) malloc(x_sz);
-    ggml_fp16_t * x_chk = (ggml_fp16_t *) malloc(x_sz_f16);
+    auto * qx = (uint8_t *) malloc(qx_sz);
+    auto * x_ref = (float *) malloc(x_sz);
+    auto * x_chk = (ggml_fp16_t *) malloc(x_sz_f16);
+    GGML_ASSERT(qx != nullptr && x_ref != nullptr && x_chk != nullptr);
 
-    for (size_t i = 0; i < ne; i++) {
-        x[i] = rand() / (float)RAND_MAX;
+    // Encode varied, exactly representable values so missing or misaddressed
+    // lanes cannot pass merely because the expected output happened to be zero.
+    for (size_t block = 0; block < nblocks; ++block) {
+        const ggml_fp16_t scale = ggml_fp32_to_fp16(1.0f + float(block % 8) / 8.0f);
+        const size_t block_offset = block * block_bytes;
+        memcpy(qx + block_offset, &scale, sizeof(scale));
+        for (size_t byte = 0; byte < block_size / 4; ++byte) {
+            uint8_t packed = 0;
+            for (size_t value = 0; value < 4; ++value) {
+                const uint8_t code = (uint8_t) ((block + byte + value) % 4);
+                packed |= code << (2 * value);
+            }
+            qx[block_offset + sizeof(scale) + byte] = packed;
+        }
     }
 
-    vk_pipeline p = ggml_vk_get_to_fp16(ctx, quant);
-
-    ggml_vk_quantize_data(x, qx, ne, quant);
-    ggml_vk_dequantize_data(qx, x_ref, ne, quant);
+    ggml_vk_dequantize_data(qx, x_ref, ne, GGML_TYPE_PQ2_0);
+    vk_buffer qx_buf = ggml_vk_create_buffer_check(ctx->device, qx_sz, {vk::MemoryPropertyFlagBits::eDeviceLocal});
+    vk_buffer x_buf = ggml_vk_create_buffer_check(ctx->device, x_sz_f16, {vk::MemoryPropertyFlagBits::eDeviceLocal});
+    vk_pipeline p = ggml_vk_get_to_fp16(ctx, GGML_TYPE_PQ2_0);
 
     ggml_pipeline_request_descriptor_sets(ctx, p, 1);
 
@@ -14893,41 +14911,31 @@ static void ggml_vk_test_dequant(ggml_backend_vk_context * ctx, size_t ne, ggml_
     ggml_vk_buffer_read(x_buf, 0, x_chk, x_sz_f16);
 
     int first_err = -1;
-
-    double avg_err = 0.0;
+    double max_err = 0.0;
     for (size_t i = 0; i < ne; i++) {
         double error = std::fabs(x_ref[i] - ggml_fp16_to_fp32(x_chk[i]));
-        avg_err += error;
-
-        if (first_err < 0 && error > 0.05) {
+        max_err = std::max(max_err, error);
+        if (first_err < 0 && error > 1e-3) {
             first_err = i;
         }
     }
-
-    avg_err /= ne;
-
-    std::cerr << "TEST DEQUANT " << ggml_type_name(quant) << " time=" << ms_dequant << "ms avg_err=" << avg_err << std::endl;
-
-    if (avg_err > 0.1) {
-        std::cerr << "first_error = " << first_err << std::endl;
-        std::cerr << "Actual result: " << std::endl << std::endl;
-        for (int i = std::max(0, first_err - 5); i < std::min((int)ne, first_err + 5); i++) {
-            std::cerr << ggml_fp16_to_fp32(x_chk[i]) << ", ";
-        }
-        std::cerr << std::endl << "Expected result: " << std::endl << std::endl;
-        for (int i = std::max(0, first_err - 5); i < std::min((int)ne, first_err + 5); i++) {
-            std::cerr << x_ref[i] << ", ";
-        }
-        std::cerr << std::endl;
+    const bool passed = first_err < 0;
+    std::cerr << "PQ2 Vulkan dequant " << (passed ? "PASS" : "FAIL")
+              << " time=" << ms_dequant << "ms max_err=" << max_err;
+    if (!passed) {
+        std::cerr << " first_error=" << first_err
+                  << " actual=" << ggml_fp16_to_fp32(x_chk[first_err])
+                  << " expected=" << x_ref[first_err];
     }
+    std::cerr << std::endl;
 
     ggml_vk_destroy_buffer(x_buf);
     ggml_vk_destroy_buffer(qx_buf);
 
-    free(x);
     free(qx);
     free(x_ref);
     free(x_chk);
+    return passed;
 }
 
 // This does not work without ggml q8_1 quantization support
@@ -17997,6 +18005,13 @@ ggml_backend_t ggml_backend_vk_init(size_t dev_num) {
 
     ggml_backend_vk_context * ctx = new ggml_backend_vk_context;
     ggml_vk_init(ctx, dev_num);
+
+#ifdef GGML_VULKAN_RUN_TESTS
+    const char * test_pq2_dequant = getenv("GGML_VK_TEST_PQ2_DEQUANT");
+    if (test_pq2_dequant != nullptr && strcmp(test_pq2_dequant, "1") == 0) {
+        GGML_ASSERT(ggml_vk_test_pq2_dequant(ctx));
+    }
+#endif
 
     ggml_backend_t vk_backend = new ggml_backend {
         /* .guid    = */ ggml_backend_vk_guid(),
