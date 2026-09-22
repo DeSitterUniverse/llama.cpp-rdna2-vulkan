@@ -1,19 +1,17 @@
 # llama.cpp
 
 > [!IMPORTANT]
-> **This is the PrismML fork of llama.cpp**, the main line behind the [Bonsai](https://huggingface.co/collections/prism-ml/bonsai) models (branch `prism`, developed as `prism-v7`). It tracks current mainline llama.cpp and adds the fork's low-bit formats and runtime features on top.
+> This is the PrismML fork of llama.cpp used by the [Bonsai](https://huggingface.co/collections/prism-ml/bonsai) models. It includes the fork's low-bit formats and runtime changes in addition to the upstream code.
 >
-> **New here? Start with the [Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) repo.** It downloads the right models and the correct prebuilt binaries for your hardware/backend automatically.
+> New users can start with the [Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) repository, which selects compatible models and binaries.
 >
-> **Which ternary model file to use:**
+> Model compatibility:
 >
-> - `*-PQ2_0.gguf` (fork group-128, ggml id 142): preferred on Metal, CUDA, HIP and CPU. About 6% smaller than group-64.
-> - `*-Q2_0_g64.gguf` / 27B `*-Q2_g64.gguf` (official group-64, ggml id 42): runs on every backend here AND on mainline llama.cpp. If unsure, use this. Newer model releases name this file plain `*-Q2_0.gguf`.
-> - `*-Q2_0.gguf` on OLDER model repos is the **deprecated legacy format** (group 128 stored as id 42). It does not load on these builds; the error tells you which file to get instead. If you must run it, use the frozen [`prism-v5`](https://github.com/PrismML-Eng/llama.cpp/tree/prism-v5) line and its final release [`prism-b9601`](https://github.com/PrismML-Eng/llama.cpp/releases/tag/prism-b9601-68faa14).
+> - `*-PQ2_0.gguf`: Prism's group-128 format.
+> - `*-Q2_0_g64.gguf` (or `*-Q2_g64.gguf` for 27B): the official group-64 format, also supported by upstream llama.cpp.
+> - Older repositories may label the group-128 format `*-Q2_0.gguf`; use the format named by the model publisher.
 >
-> **Speculative decoding (dspark)** is supported via mainline's draft-dspark plus fork patches. Drafters published for older model releases need a one-time conversion with `gguf-dspark-to-dflash` (see [SPECULATIVE.md](https://github.com/PrismML-Eng/Bonsai-demo/blob/main/SPECULATIVE.md) in Bonsai-demo); newer releases ship ready-to-use drafters.
->
-> Do NOT build from `prism-v6` (stale mid-migration snapshot) and do NOT mix this fork's `ggml-*` libraries with a stock llama.cpp build.
+> Speculative decoding with dspark/dflash is supported. Keep this fork's `ggml-*` libraries and runtime together; do not mix them with a stock llama.cpp build.
 
 ## Experimental RDNA2/Vulkan PQ2 branch
 
@@ -21,21 +19,18 @@ This branch adds an AMD RDNA2/Vulkan execution path for Prism PQ2_0 models,
 plus the Qwen3.5 Hadamard inverse needed for MTP models to initialize and a
 direct recurrent-state-row path for Qwen3.5 GatedDeltaNet.
 
-| Path | Mode | Decode | Prompt | Change vs legacy | Notes |
-| --- | --- | ---: | ---: | ---: | --- |
-| Legacy `GET_ROWS` | No MTP | 33.83 tok/s | 76.4 tok/s | baseline | Forced with `GGML_GDN_STATE_GATHER=1` |
-| Direct state rows | No MTP | 34.67 tok/s | 77.97 tok/s | +2.46% | Default Vulkan path |
-| Legacy `GET_ROWS` | MTP n-max 2 | 46.70 tok/s | 68.63 tok/s | baseline | Same 62.5% draft acceptance |
-| Direct state rows | MTP n-max 2 | 47.40 tok/s | 68.37 tok/s | +1.50% | Same output hash and acceptance |
+| Path | Mode | Decode tok/s (mean, n=9) | Change vs legacy |
+| --- | --- | ---: | ---: |
+| Legacy `GET_ROWS` | No MTP | 33.86 | baseline |
+| Direct state rows | No MTP | 34.19 | +0.98% |
+| Legacy `GET_ROWS` | MTP n-max 2 | 46.39 | baseline |
+| Direct state rows | MTP n-max 2 | 47.08 | +1.49% |
 
-The matched A/B methodology, profiler receipt, allocation history, rollback
-limitation, and caveats are in
+Each result averages three repeats for each of three prompts (256 tokens per
+request). A/B output hashes match. Full per-prompt results, settings, and tests:
 [docs/RDNA2_VULKAN.md](docs/RDNA2_VULKAN.md).
 
-This is an experimental, hardware-specific fork. It is based on Prism commit
-[`9a9394a`](https://github.com/PrismML-Eng/llama.cpp/commit/9a9394a895b96003ca842a6041cb28ac49a108f7),
-does not modify model weights, and does not claim byte-identical output across
-the wave64 and wave32 reduction paths.
+This is an experimental, hardware-specific branch; model weights are unchanged.
 
 ---
 
